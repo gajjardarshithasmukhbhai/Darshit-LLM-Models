@@ -3290,3 +3290,1270 @@ const response = await chain.invoke({
 - Use with few-shot learning
 - Monitor reasoning quality
 
+# Chain of Thought Prompting
+
+## Overview
+Chain of Thought (CoT) prompting, introduced by Wei et al. (2022), guides language models through intermediate reasoning steps for complex tasks. Rather than direct answers, it encourages step-by-step thinking.
+
+## Example Problem Solving
+
+```javascript
+const mathProblem = {
+  question: "Roger has 5 tennis balls. He buys 2 more cans of tennis balls. Each can has 3 balls. How many does he have now?",
+  reasoning: `
+Let's solve this step by step:
+1. Initial count: Roger starts with 5 balls
+2. New purchases: 2 cans × 3 balls per can = 6 new balls
+3. Final count: 5 initial + 6 new = 11 balls total
+  `,
+  answer: "11 tennis balls"
+};
+```
+
+## Vector Store Integration
+
+```javascript
+import { MaxMarginalRelevanceExampleSelector } from 'langchain/prompts';
+import { HuggingFaceBgeEmbeddings } from 'langchain/embeddings';
+import { FaissStore } from 'langchain/vectorstores/faiss';
+
+// Setup embeddings and store
+const embeddings = new HuggingFaceBgeEmbeddings();
+const examples = await loadExamplesFromHuggingFace(); // Your loading function
+
+const selector = await MaxMarginalRelevanceExampleSelector.fromExamples(
+  examples,
+  embeddings,
+  FaissStore,
+  { k: 4, fetchK: 20 }
+);
+
+const examplePrompt = PromptTemplate.fromTemplate(`
+Question: {question}
+Reasoning: {reasoning}
+Answer: {answer}
+`);
+
+const chainOfThoughtPrompt = new FewShotPromptTemplate({
+  exampleSelector: selector,
+  examplePrompt,
+  prefix: "Consider the following examples of step-by-step reasoning:",
+  suffix: `
+Using a similar reasoning approach, answer the user's question.
+Take a deep breath and break down the query step-by-step.
+
+Question: {input}
+Reasoning:`,
+  inputVariables: ["input"]
+});
+```
+
+## Best Practices
+
+1. **Prompt Structure**
+   - Include clear reasoning steps
+   - Break down complex problems
+   - Show intermediate calculations
+   - End with conclusive answers
+
+2. **Example Selection**
+   - Use relevant examples from vector store
+   - Maintain diverse reasoning patterns
+   - Include edge cases
+
+3. **Implementation Tips**
+   - Set temperature to 0 for consistent reasoning
+   - Use "take a deep breath" type instructions
+   - Consider adding helpful hints in prompts
+
+## Use Cases
+- Multi-step arithmetic problems
+- Logical reasoning tasks
+- Scientific problem solving
+- Common sense reasoning
+- Process analysis
+
+# Self-Consistency Prompting
+
+## Overview
+Self-consistency prompting (Wang et al., 2022) explores multiple valid reasoning paths to achieve more reliable answers. Unlike standard chain-of-thought, it samples multiple paths and determines the most consistent answer among them.
+
+## Implementation Example
+
+```javascript
+import { ChatOpenAI } from 'langchain/chat_models/openai';
+import { PromptTemplate } from 'langchain/prompts';
+
+// Setup for multiple reasoning paths
+const selfConsistencyTemplate = `
+Based on the responses delimited by [brackets] to the following query delimited by triple backticks, return the response that occurs most frequently.
+
+Query: ```{query}```
+
+Let's solve this step by step through multiple approaches:
+
+[Response 1]
+{reasoning1}
+
+[Response 2]
+{reasoning2}
+
+[Response 3]
+{reasoning3}
+
+Most consistent answer:`;
+
+// Generate multiple reasoning paths
+async function generateMultipleReasonings(query, n = 5) {
+  const model = new ChatOpenAI({
+    modelName: "gpt-3.5-turbo",
+    temperature: 0.7,
+    n: n
+  });
+
+  const cotPrompt = chainOfThoughtPrompt.format({
+    input: query
+  });
+
+  const generations = await model.generate([cotPrompt], n);
+  return generations.generations.map(g => g.text);
+}
+
+// Find most consistent answer
+async function findMostConsistentAnswer(query) {
+  const reasonings = await generateMultipleReasonings(query);
+  
+  const selfConsistencyPrompt = PromptTemplate.fromTemplate(selfConsistencyTemplate);
+  const finalPrompt = await selfConsistencyPrompt.format({
+    query,
+    reasoning1: reasonings[0],
+    reasoning2: reasonings[1],
+    reasoning3: reasonings[2]
+  });
+
+  const model = new ChatOpenAI({ temperature: 0 });
+  return await model.call(finalPrompt);
+}
+
+// Usage example
+const response = await findMostConsistentAnswer(
+  "If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are there?"
+);
+```
+
+## Best Practices
+
+1. **Multiple Paths Generation**
+   - Use temperature > 0 for diversity
+   - Generate enough paths (3-5 minimum)
+   - Maintain reasoning structure
+
+2. **Answer Aggregation**
+   - Consider frequency of answers
+   - Look for reasoning consistency
+   - Handle contradictions
+
+3. **Implementation Tips**
+   - Use structured prompts
+   - Balance path diversity
+   - Consider computational costs
+
+## Use Cases
+- Complex arithmetic problems
+- Multi-step reasoning tasks
+- Ambiguous scenarios
+- Verification of solutions
+- Quality assurance
+
+# Self-Ask Prompting
+
+## Overview
+Self-Ask prompting (Press et al., 2022) addresses the compositional reasoning gap in language models by enabling them to break down complex questions into smaller, manageable sub-questions.
+
+## Implementation Example
+
+```javascript
+import { 
+  ChatOpenAI,
+  AgentExecutor,
+  DuckDuckGoSearchTools,
+  SelfAskOutputParser
+} from 'langchain';
+
+// Setup tools
+const search = new DuckDuckGoSearchTools();
+const tools = [{
+  name: "intermediate_answer",
+  func: search.run.bind(search),
+  description: "Search engine to find answers to factual questions"
+}];
+
+// Create self-ask prompt
+const selfAskTemplate = `Question: {question}
+
+Let's approach this step-by-step:
+
+1) First, let me check if I need to search for any information.
+2) If yes, I'll ask a follow-up question and search for the answer.
+3) I'll repeat this process until I have enough information.
+4) Finally, I'll provide a complete answer.
+
+Follow-up: Do I need to search for any information to answer this question?
+
+{agent_scratchpad}`;
+
+// Create agent with stop sequence
+const model = new ChatOpenAI({ temperature: 0 })
+  .bind({ stop: ["intermediate answer"] });
+
+// Create self-ask agent
+const agent = await createSelfAskWithSearch({
+  llm: model,
+  tools,
+  prompt: selfAskTemplate
+});
+
+// Execute agent
+const result = await AgentExecutor.fromAgentAndTools({
+  agent,
+  tools,
+  verbose: true
+}).invoke({
+  question: "What is the RWKV architecture for LLMs?"
+});
+```
+
+## Modern Implementation (Recommended)
+
+```javascript
+import { createSelfAskWithSearchAgent } from 'langchain/agents';
+
+const agent = await createSelfAskWithSearchAgent({
+  llm: model,
+  tools,
+  prompt: selfAskTemplate
+});
+
+const executor = new AgentExecutor({
+  agent,
+  tools,
+  verbose: true
+});
+
+const response = await executor.invoke({
+  input: "What is Direct Preference Optimization?"
+});
+```
+
+## Best Practices
+
+1. **Question Decomposition**
+   - Break complex queries into sub-questions
+   - Validate intermediate answers
+   - Monitor reasoning chains
+
+2. **Search Integration**
+   - Use reliable search tools
+   - Validate search results
+   - Handle search failures gracefully
+
+3. **Implementation Tips**
+   - Set appropriate stop sequences
+   - Monitor for hallucinations
+   - Implement error handling
+   - Consider rate limits
+
+## Use Cases
+- Complex factual queries
+- Multi-step reasoning tasks
+- Research questions
+- Fact verification
+- Knowledge exploration
+
+# Core Concepts
+
+## Prompting Strategies
+
+### Direct Prompting
+The simplest form of interaction:
+- Single question/instruction
+- Direct response
+- No intermediate steps
+- Limited reasoning capability
+
+### Chain of Thought (CoT)
+Encourages step-by-step reasoning:
+- Breaks down complex problems
+- Shows intermediate steps
+- Improves accuracy
+- Better for mathematical/logical tasks
+
+### Zero-Shot Prompting
+Handling new tasks without examples:
+- No training examples needed
+- Uses model's existing knowledge
+- Often enhanced with phrases like "Let's think step by step"
+- Lower accuracy than few-shot methods
+
+### Few-Shot Prompting
+Learning from examples in the prompt:
+- Include 2-5 examples
+- Demonstrates desired format
+- Improves consistency
+- Better for specific formats/styles
+
+## Advanced Techniques
+
+### Retrieval Augmentation
+Enhancing responses with external knowledge:
+- Real-time information access
+- Reduced hallucination
+- Dynamic knowledge updates
+- Source verification
+
+### Active Retrieval
+Dynamic information gathering:
+- Confidence-based retrieval
+- Self-questioning
+- Iterative refinement
+- Adaptive context building
+
+### Planning and Execution
+Structured problem-solving approach:
+- Explicit planning phase
+- Subtask breakdown
+- Sequential execution
+- Progress monitoring
+
+## Practical Considerations
+
+### Model Selection
+Factors to consider:
+- Context window size
+- Token costs
+- Temperature settings
+- Model capabilities
+
+### Error Handling
+Common challenges:
+- Token limits
+- Rate limiting
+- Error recovery
+- Fallback strategies
+
+### Performance Optimization
+Key strategies:
+- Caching
+- Batching
+- Prompt optimization
+- Response streaming
+
+# ReAct Prompting
+
+## Overview
+ReAct (Reasoning and Acting) framework, introduced by Google researchers in 2022, combines reasoning traces with task-specific actions in language models. It enables:
+- Dynamic plan updates
+- Exception handling
+- External information gathering
+
+## Comparison with Other Methods
+1. Standard Prompting: Direct question → answer
+2. Chain of Thought: Reasoning examples → guided thinking
+3. Action Only: Action examples → guided actions
+4. ReAct: Interleaved reasoning and actions
+
+## Implementation Example
+
+```javascript
+import { 
+  DuckDuckGoSearchTools,
+  WikipediaQueryRun,
+  createReactAgent,
+  AgentExecutor 
+} from 'langchain';
+
+// Setup tools
+const searchTool = new DuckDuckGoSearchTools();
+const wikiTool = new WikipediaQueryRun();
+
+const tools = [
+  {
+    name: "search",
+    func: searchTool.run.bind(searchTool),
+    description: "Search the web for current information"
+  },
+  {
+    name: "wikipedia",
+    func: wikiTool.run.bind(wikiTool),
+    description: "Search Wikipedia articles"
+  }
+];
+
+// Create ReAct agent
+const model = new ChatOpenAI({ modelName: "gpt-4", temperature: 0 });
+
+const agent = await createReactAgent({
+  llm: model,
+  tools,
+  verbose: true
+});
+
+const executor = new AgentExecutor({
+  agent,
+  tools,
+  verbose: true
+});
+
+// Example usage
+const response = await executor.invoke({
+  input: "Who is playing in the Super Bowl 2024? Where will it be played?"
+});
+```
+
+## Tool Integration
+
+ReAct supports various tools including:
+- Web search (DuckDuckGo, Bing)
+- Knowledge bases (Wikipedia)
+- Archives
+- Custom tools
+
+## Best Practices
+
+1. **Tool Selection**
+   - Choose appropriate tools for task
+   - Provide clear tool descriptions
+   - Consider tool reliability
+
+2. **Reasoning Process**
+   - Monitor reasoning traces
+   - Validate external information
+   - Handle tool failures
+
+3. **Implementation Tips**
+   - Use verbose mode for debugging
+   - Implement error handling
+   - Consider rate limits
+   - Monitor API usage
+
+## Use Cases
+- Question answering
+- Fact verification
+- Web navigation
+- Research tasks
+- Document analysis
+
+# Retrieval Augmented Generation (RAG)
+
+## Overview
+Introduced by Meta AI in 2020, RAG enhances LLMs by providing access to external knowledge sources, addressing limitations like:
+- Expensive training/fine-tuning
+- Static knowledge bases
+- Hallucination problems
+
+## Core Components
+
+1. **Language Model**
+   - Generates human-like text responses
+   - Processes augmented context
+
+2. **Vector Store**
+   - Houses embeddings and text data
+   - Enables efficient similarity search
+
+3. **Document Processing**
+   - Loaders: Import from various sources
+   - Chunkers: Break documents into manageable pieces
+   - Embedders: Convert text to vector representations
+
+## Implementation Example
+
+```javascript
+import { 
+  RecursiveCharacterTextSplitter,
+  OpenAIEmbeddings,
+  FaissStore,
+  ChatOpenAI,
+  loadPrompt 
+} from 'langchain';
+
+// Document Loading and Processing
+const webLoader = new WebBaseLoader([
+  'https://example.com/article1',
+  'https://example.com/article2'
+]);
+const docs = await webLoader.load();
+
+// Text Splitting
+const textSplitter = new RecursiveCharacterTextSplitter({
+  chunkSize: 500,
+  chunkOverlap: 50
+});
+const chunks = await textSplitter.splitDocuments(docs);
+
+// Embeddings and Storage
+const embeddings = new CacheBackedEmbeddings({
+  underlyingEmbeddings: new OpenAIEmbeddings(),
+  documentEmbeddings: new InMemoryStore()
+});
+
+const vectorStore = await FaissStore.fromDocuments(
+  chunks,
+  embeddings
+);
+
+// Create Retriever
+const retriever = vectorStore.asRetriever();
+
+// Setup RAG Chain
+const formatDocs = (docs) => docs.map(doc => doc.pageContent).join('\n\n');
+
+const ragChain = RunnableSequence.from([
+  {
+    context: retriever.pipe(formatDocs),
+    question: new RunnablePassthrough()
+  },
+  await loadPrompt("rag/chat"),
+  new ChatOpenAI({ modelName: "gpt-4" }),
+  new StringOutputParser()
+]);
+
+// Example Usage
+const response = await ragChain.invoke(
+  "What is Neural Architecture Search?"
+);
+```
+
+## Index Subsystem Steps
+
+1. **Document Loading**
+   - Import from various sources
+   - Convert to document objects
+
+2. **Text Processing**
+   - Split into chunks
+   - Create embeddings
+   - Store in vector database
+
+3. **Retrieval System**
+   - Process user query
+   - Find similar documents
+   - Return relevant matches
+
+## Best Practices
+
+1. **Document Processing**
+   - Choose appropriate chunk sizes
+   - Consider content overlap
+   - Monitor embedding quality
+
+2. **Vector Store Management**
+   - Use caching when possible
+   - Monitor storage efficiency
+   - Consider scaling requirements
+
+3. **Query Processing**
+   - Implement error handling
+   - Monitor retrieval quality
+   - Balance speed vs accuracy
+
+## Implementation Tips
+
+- Use cached embeddings
+- Monitor token usage
+- Consider batch processing
+- Implement logging
+- Handle edge cases
+
+# Forward-Looking Active REtrieval (FLARE)
+
+## Overview
+Introduced in 2023, FLARE enhances RAG by actively retrieving information during generation. Unlike traditional RAG that retrieves once upfront, FLARE continuously checks confidence and retrieves as needed.
+
+Key features:
+- Active retrieval during generation
+- Confidence-based token checking
+- Forward-looking query generation
+- Iterative refinement
+
+## Implementation Example
+
+```javascript
+import { 
+  OpenAI,
+  ChatOpenAI,
+  FLAREChain,
+  ArchiveRetriever 
+} from 'langchain';
+
+// Setup components
+const llm = new OpenAI({
+  modelName: "text-davinci-003",
+  temperature: 0,
+  streaming: true,
+  logprobs: true
+});
+
+const questionGenerator = new ChatOpenAI({
+  temperature: 0
+});
+
+// Create retriever
+const retriever = vectorStore.asRetriever();
+
+// Initialize FLARE chain
+const flareChain = await FLAREChain.fromLLM({
+  llm,
+  retriever,
+  questionGeneratorLLM: questionGenerator,
+  maxGenerationLength: 128,
+  minProbability: 0.2,
+  verbose: true,
+  handleParsingErrors: true
+});
+
+// Example usage
+const response = await flareChain.invoke({
+  query: "Explain the steps in the FLARE pipeline"
+});
+```
+
+## Process Steps
+
+1. **Initial Generation**
+   - Start with user input
+   - Retrieve initial context
+   - Begin generating response
+
+2. **Confidence Checking**
+   - Monitor token probabilities
+   - Identify uncertain segments
+   - Generate clarifying questions
+
+3. **Active Retrieval**
+   - Use generated questions
+   - Fetch relevant documents
+   - Update generation context
+
+4. **Iterative Refinement**
+   - Regenerate uncertain parts
+   - Continue until confident
+   - Maintain coherence
+
+## Best Practices
+
+1. **Model Selection**
+   - Use models with logprobs
+   - Balance speed vs accuracy
+   - Consider token limits
+
+2. **Parameter Tuning**
+   - Adjust confidence thresholds
+   - Optimize generation length
+   - Configure retrieval frequency
+
+3. **Performance Optimization**
+   - Cache retrievals
+   - Monitor generation time
+   - Handle timeouts
+
+## Implementation Tips
+
+- Use OpenAI for logprobs
+- Monitor token confidence
+- Cache intermediate results
+- Handle long generations
+- Implement timeout logic
+
+# Plan and Execute Prompting
+
+## Overview
+Plan-and-Solve prompting (Wang et al., 2023) enhances zero-shot chain-of-thought reasoning by dividing complex tasks into planning and execution phases.
+
+Key differences from zero-shot chain-of-thought:
+- Explicit planning phase
+- Structured execution
+- Enhanced error handling (Plan-and-Solve Plus)
+
+## Implementation Example
+
+```javascript
+import { 
+  PlanAndExecuteAgent,
+  initializeAgentExecutorWithOptions,
+  DuckDuckGoSearchTools,
+  Calculator 
+} from 'langchain/experimental';
+
+// Setup components
+const model = new ChatOpenAI({
+  modelName: "gpt-4-0125-preview",
+  temperature: 0
+});
+
+// Setup tools
+const tools = [
+  new DuckDuckGoSearchTools(),
+  new Calculator()
+];
+
+// Create planner
+const planner = await initializeAgentExecutorWithOptions(
+  tools,
+  model,
+  {
+    agentType: "plan-and-execute",
+    verbose: true
+  }
+);
+
+// Create executor
+const executor = await initializeAgentExecutorWithOptions(
+  tools,
+  model,
+  {
+    agentType: "structured-chat-zero-shot-react-description",
+    verbose: true
+  }
+);
+
+// Initialize agent
+const agent = new PlanAndExecuteAgent({
+  planner,
+  executor,
+  verbose: true
+});
+
+// Example usage
+const response = await agent.invoke({
+  input: "What's the current temperature in Winnipeg? Get the absolute value."
+});
+```
+
+## Process Steps
+
+1. **Planning Phase**
+   ```javascript
+   const plannerPrompt = `
+   Let's understand the problem and devise a plan.
+   Please output the plan starting with 'Plan:' followed by numbered steps.
+   
+   Current goal: {input}
+   Available tools: {tools}
+   `;
+   ```
+
+2. **Execution Phase**
+   ```javascript
+   const executorPrompt = `
+   Execute the following plan step by step:
+   {plan}
+   
+   Current step: {step}
+   Previous steps completed: {previous_steps}
+   `;
+   ```
+
+## Best Practices
+
+1. **Agent Configuration**
+   - Use temperature = 0
+   - Enable verbose mode
+   - Consider tool selection
+
+2. **Planning Strategy**
+   - Break tasks into subtasks
+   - Handle dependencies
+   - Consider edge cases
+
+3. **Execution Optimization**
+   - Monitor step completion
+   - Handle failures gracefully
+   - Track progress
+
+## Use Cases
+- Complex multi-step tasks
+- Tasks requiring coordination
+- Research and analysis
+- Data gathering and processing
+- Sequential decision making
+
+# Prompt Management
+
+## Overview
+Prompt engineering requires systematic version control and management due to LLMs' high sensitivity to prompt changes. Even minor modifications in:
+- Wording
+- Punctuation
+- Spacing
+- Line breaks
+can significantly impact model outputs.
+
+## Challenge Areas
+
+### Version Control
+```javascript
+// Example of prompt versioning
+const promptVersions = {
+  v1: "Summarize this text",
+  v2: "Summarize this text briefly",
+  v3: "Summarize this text briefly and clearly",
+  current: "Provide a brief, clear summary of this text"
+};
+```
+
+### Change Tracking
+```javascript
+const promptChangelog = [
+  {
+    version: "1.0.0",
+    date: "2024-02-01",
+    changes: "Initial prompt structure",
+    prompt: "Summarize text"
+  },
+  {
+    version: "1.0.1",
+    date: "2024-02-02",
+    changes: "Added clarity instruction",
+    prompt: "Summarize text clearly"
+  }
+];
+```
+
+## LangSmith Integration
+
+### Basic Setup
+```javascript
+import { Client } from "langsmith";
+
+const client = new Client({
+  apiKey: process.env.LANGSMITH_API_KEY
+});
+
+// Create project
+const project = await client.createProject({
+  name: "prompt-optimization",
+  reference_id: "prompt-opt-001"
+});
+
+// Track prompt runs
+const run = await client.createRun({
+  name: "summarization-prompt",
+  project_id: project.id,
+  inputs: { text: "Sample text" },
+  runtime: {
+    prompt_template: promptVersions.current
+  }
+});
+```
+
+### Prompt Evaluation
+```javascript
+// Evaluate prompt performance
+const evaluation = await client.createEvaluation({
+  run_id: run.id,
+  metrics: {
+    relevance: 0.85,
+    clarity: 0.9,
+    accuracy: 0.88
+  }
+});
+```
+
+# LangSmith Platform
+
+## Overview
+LangSmith is a unified platform for debugging, testing, and monitoring LLM applications. It bridges the gap between prototyping and production deployment by providing:
+- Comprehensive debugging tools
+- Testing frameworks
+- Performance monitoring
+- Usage analytics
+
+## Core Features
+
+### Development Support
+```javascript
+// Development environment setup
+const developmentConfig = {
+  langsmith: {
+    apiKey: process.env.LANGSMITH_API_KEY,
+    projectName: "development",
+    traceOptions: {
+      enableDebug: true,
+      captureInputs: true,
+      captureOutputs: true
+    }
+  }
+};
+```
+
+### Testing Framework
+```javascript
+// Example test suite setup
+const testSuite = {
+  name: "Chain Validation",
+  tests: [
+    {
+      description: "Input validation test",
+      input: { query: "test query" },
+      expectedOutput: { type: "string", minLength: 10 },
+      evaluationMetrics: ["accuracy", "latency"]
+    }
+  ],
+  runConfig: {
+    batchSize: 10,
+    parallel: true
+  }
+};
+```
+
+### Monitoring System
+```javascript
+// Production monitoring setup
+const monitoringSetup = {
+  metrics: ["latency", "tokenUsage", "errorRate"],
+  alerts: {
+    errorThreshold: 0.05,
+    latencyThreshold: 2000,
+    notification: {
+      email: "alerts@example.com",
+      slack: "#monitoring"
+    }
+  }
+};
+```
+
+## Use Cases
+
+1. **Development Phase**
+   - Component debugging
+   - Prompt optimization
+   - Performance profiling
+   - Error tracing
+
+2. **Testing Phase**
+   - Automated testing
+   - Quality assurance
+   - Regression testing
+   - Performance benchmarking
+
+3. **Production Phase**
+   - Live monitoring
+   - Usage analytics
+   - Cost tracking
+   - Performance optimization
+
+## Integration Example
+
+```javascript
+import { Client } from "langsmith";
+
+// Initialize LangSmith client
+const langsmith = new Client({
+  apiKey: process.env.LANGSMITH_API_KEY,
+  projectName: "production-app"
+});
+
+// Create trace
+const trace = await langsmith.createTrace({
+  name: "user-query-processing",
+  metadata: {
+    environment: "production",
+    version: "1.0.0"
+  }
+});
+
+// Track chain execution
+const trackChain = async (chain, input) => {
+  const run = await langsmith.createRun({
+    name: chain.name,
+    traceId: trace.id,
+    inputs: input,
+    startTime: new Date()
+  });
+
+  try {
+    const result = await chain.invoke(input);
+    await langsmith.updateRun({
+      runId: run.id,
+      outputs: result,
+      endTime: new Date(),
+      status: "completed"
+    });
+    return result;
+  } catch (error) {
+    await langsmith.updateRun({
+      runId: run.id,
+      error: error.message,
+      endTime: new Date(),
+      status: "failed"
+    });
+    throw error;
+  }
+};
+```
+
+## Best Practices
+
+1. **Development Best Practices**
+   - Enable detailed tracing
+   - Use meaningful run names
+   - Tag environments
+   - Track metadata
+
+2. **Testing Best Practices**
+   - Create comprehensive test suites
+   - Use realistic test data
+   - Monitor performance metrics
+   - Track regression issues
+
+3. **Production Best Practices**
+   - Set up alerting
+   - Monitor costs
+   - Track usage patterns
+   - Analyze performance trends
+
+## Deployment Considerations
+
+1. **Security**
+   - API key management
+   - Data privacy
+   - Access control
+   - Audit logging
+
+2. **Scaling**
+   - Resource management
+   - Performance optimization
+   - Cost monitoring
+   - Usage quotas
+
+# LangSmith Walkthrough
+
+## Initial Setup
+
+1. **Registration**
+   - Visit smith.langchain.com
+   - Sign up options:
+     - Discord
+     - GitHub
+     - Google
+     - Email
+
+2. **API Key Management**
+   ```javascript
+   // Store API key securely in environment variables
+   const config = {
+     langsmith: {
+       apiKey: process.env.LANGSMITH_API_KEY,
+       baseUrl: "https://api.smith.langchain.com"
+     }
+   };
+   ```
+
+## UI Components
+
+### Projects Dashboard
+- Run history
+- Execution monitoring
+- Performance metrics
+- Debug information
+
+### Annotation Interface
+```javascript
+// Example annotation setup
+const annotationConfig = {
+  queue: "code-review",
+  metadata: {
+    reviewer: "expert-dev",
+    criteria: ["correctness", "efficiency", "style"]
+  },
+  feedback: {
+    type: "structured",
+    options: ["approved", "needs_revision", "rejected"]
+  }
+};
+```
+
+### Hub Management
+
+1. **Creating New Prompts**
+   ```javascript
+   // Example prompt creation
+   const newPrompt = {
+     name: "linkedin-learning-example",
+     description: "Prompt for LangSmith section of LinkedIn Learning course",
+     useCase: "code-writing",
+     language: "English",
+     model: "gpt-3.5-turbo",
+     isPrivate: true,
+     template: `
+       You're an expert in PyTorch, Hugging Face, and OpenAI.
+       You're helping a user write code to complete their work.
+       Be brief and speak as if you were a punk rocker.
+
+       Question: {query}
+     `
+   };
+   ```
+
+2. **Prompt Settings**
+   ```javascript
+   const promptSettings = {
+     model: "gpt-3.5-turbo",
+     temperature: 0.2,
+     maxTokens: 1000,
+     topP: 0.9,
+     frequencyPenalty: 0,
+     presencePenalty: 0
+   };
+   ```
+
+## Best Practices
+
+1. **API Key Security**
+   - Never expose keys in code
+   - Use environment variables
+   - Rotate keys regularly
+   - Monitor key usage
+
+2. **Prompt Version Control**
+   - Use descriptive names
+   - Add detailed descriptions
+   - Document use cases
+   - Track modifications
+
+3. **Testing Strategy**
+   - Test with various inputs
+   - Monitor response quality
+   - Track performance metrics
+   - Document edge cases
+
+## Implementation Example
+
+```javascript
+import { LangSmithClient } from "langsmith";
+
+// Initialize client with secure configuration
+const client = new LangSmithClient({
+  apiKey: process.env.LANGSMITH_API_KEY
+});
+
+// Create and test a prompt
+const testPrompt = async () => {
+  // Create prompt
+  const prompt = await client.createPrompt({
+    ...newPrompt,
+    settings: promptSettings
+  });
+
+  // Test prompt
+  const result = await client.testPrompt(prompt.id, {
+    query: "Write a PyTorch training loop"
+  });
+
+  // Save version if successful
+  if (result.success) {
+    await client.createPromptVersion(prompt.id, {
+      version: "1.0.0",
+      changes: "Initial working version"
+    });
+  }
+
+  return result;
+};
+```
+
+# Prompt Versioning in LangSmith
+
+## Overview
+Prompt versioning ensures stability in production environments by allowing specific version usage and tracking changes. LangChain Hub supports version control through commit hashes.
+
+## Implementation
+
+### Loading Versioned Prompts
+```javascript
+import { loadPrompt } from 'langchain/prompts/load';
+
+// Load specific version of a prompt
+const loadVersionedPrompt = async () => {
+  const promptId = "datascienceharp/linkedin-learning-example@v1";
+  return await loadPrompt(promptId);
+};
+
+// Using with LLM
+const chain = prompt
+  .pipe(new ChatOpenAI())
+  .pipe(new StringOutputParser());
+```
+
+### Prompt Management
+```javascript
+// Example prompt modification
+const updatePrompt = async (originalPrompt) => {
+  // Add new instructions
+  originalPrompt += "\nWrite code that follows PEP8 standards";
+  originalPrompt += "\nYou also hate being nice";
+  
+  return originalPrompt;
+};
+
+// Push to LangChain Hub
+const pushPrompt = async (prompt, accountHandle, promptName) => {
+  await client.pushPrompt(`${accountHandle}/${promptName}`, prompt);
+};
+```
+
+## Version Control Features
+
+1. **Commit Management**
+   ```javascript
+   const versionControl = {
+     getCommitHistory: async (promptId) => {
+       const history = await client.getPromptHistory(promptId);
+       return history.map(commit => ({
+         hash: commit.hash,
+         timestamp: commit.timestamp,
+         changes: commit.message
+       }));
+     },
+     
+     getSpecificVersion: async (promptId, version) => {
+       return await client.getPromptVersion(`${promptId}@${version}`);
+     }
+   };
+   ```
+
+2. **Prompt Updates**
+   ```javascript
+   const promptUpdate = async (promptId, newContent) => {
+     const prompt = await client.getPrompt(promptId);
+     prompt.content = newContent;
+     
+     // Create new version
+     const version = await client.createVersion(promptId, {
+       content: prompt.content,
+       message: "Updated prompt content"
+     });
+     
+     return version;
+   };
+   ```
+
+## Best Practices
+
+1. **Version Management**
+   - Use specific versions in production
+   - Test changes before deployment
+   - Document version differences
+   - Maintain changelog
+
+2. **Deployment Strategy**
+   - Stage changes in development
+   - Test thoroughly
+   - Roll out gradually
+   - Monitor performance
+
+3. **Collaboration**
+   - Use descriptive commit messages
+   - Review changes
+   - Document dependencies
+   - Track issues
